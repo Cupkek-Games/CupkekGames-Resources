@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using CupkekGames.Data;
 using CupkekGames.Resources.Experiences.Curves;
 using CupkekGames.Services;
+using UnityEngine;
+using ExperiencePair = CupkekGames.KeyValueDatabases.KeyValuePair<string, long>;
 
 namespace CupkekGames.Resources.Experiences
 {
@@ -12,10 +14,17 @@ namespace CupkekGames.Resources.Experiences
     /// into save-data structures.
     /// </summary>
     /// <remarks>
+    /// Storage is serializer-agnostic (see <see cref="CupkekGames.KeyValueDatabases.KeyValueDatabase{TKey,TValue}"/> for the
+    /// canonical pattern): the serialized source of truth is a Unity-serializable pair list —
+    /// Unity binds the <c>[SerializeField]</c> field, reflection serializers (Newtonsoft, …)
+    /// bind the public <see cref="Totals"/> property — and the runtime dictionary is a lazy,
+    /// never-serialized cache.
+    /// <para>
     /// Level computation is curve-driven. The tracker resolves each track's curve via
     /// <see cref="ServiceLocator"/> using the <see cref="ExperienceDefinitionSO.CurveKey"/>
     /// — register an <see cref="ExperienceCatalog"/> + <see cref="ExperienceCurveCatalog"/>
     /// before calling <see cref="GetLevel"/> or <see cref="AddExp"/> on a tracker.
+    /// </para>
     /// <para>
     /// <see cref="OnExperienceChanged"/> fires after every successful mutation.
     /// <see cref="OnLevelUp"/> fires when an <see cref="AddExp"/> call crosses one or
@@ -31,7 +40,9 @@ namespace CupkekGames.Resources.Experiences
         /// <summary>Fires with <c>(trackId, oldLevel, newLevel)</c> when a mutation crosses a level threshold.</summary>
         public event Action<string, int, int> OnLevelUp;
 
-        private Dictionary<string, long> _totals = new();
+        [SerializeField] private List<ExperiencePair> _totals = new();
+
+        [NonSerialized] private Dictionary<string, long> _cache;
 
         public ExperienceTracker() { }
 
@@ -39,17 +50,59 @@ namespace CupkekGames.Resources.Experiences
         {
             if (other?._totals == null)
                 return;
-            foreach (KeyValuePair<string, long> pair in other._totals)
-                _totals[pair.Key] = pair.Value;
+            foreach (ExperiencePair pair in other._totals)
+                _totals.Add(new ExperiencePair { Key = pair.Key, Value = pair.Value });
         }
 
-        public IReadOnlyDictionary<string, long> Totals => _totals;
+        /// <summary>
+        /// Serialized pairs, exposed for reflection-based serializers. Unity ignores
+        /// properties and binds the backing field directly.
+        /// </summary>
+        public List<ExperiencePair> Totals
+        {
+            get => _totals;
+            set
+            {
+                _totals = value ?? new List<ExperiencePair>();
+                _cache = null;
+            }
+        }
+
+        private Dictionary<string, long> Cache
+        {
+            get
+            {
+                if (_cache == null)
+                {
+                    _cache = new Dictionary<string, long>(_totals.Count);
+                    foreach (ExperiencePair pair in _totals)
+                        _cache.TryAdd(pair.Key, pair.Value);
+                }
+                return _cache;
+            }
+        }
+
+        private void SetRaw(string id, long amount)
+        {
+            if (Cache.ContainsKey(id))
+            {
+                Cache[id] = amount;
+                int index = _totals.FindIndex(pair => pair.Key == id);
+                if (index >= 0)
+                    _totals[index] = new ExperiencePair { Key = id, Value = amount };
+            }
+            else
+            {
+                Cache.Add(id, amount);
+                _totals.Add(new ExperiencePair { Key = id, Value = amount });
+            }
+        }
 
         public long Get(string id) =>
-            !string.IsNullOrEmpty(id) && _totals.TryGetValue(id, out long v) ? v : 0L;
+            !string.IsNullOrEmpty(id) && Cache.TryGetValue(id, out long v) ? v : 0L;
 
         public bool Has(string id) =>
-            !string.IsNullOrEmpty(id) && _totals.ContainsKey(id);
+            !string.IsNullOrEmpty(id) && Cache.ContainsKey(id);
 
         /// <summary>Replaces the stored total and fires <see cref="OnExperienceChanged"/> + <see cref="OnLevelUp"/> if the level crossed.</summary>
         public void Set(string id, long amount)
@@ -61,7 +114,7 @@ namespace CupkekGames.Resources.Experiences
                 return;
             ExperienceCurveSO curve = ResolveCurve(id);
             int oldLevel = curve != null ? ExperienceHelper.GetLevel((int)old, curve.GetRequiredExperience) : 0;
-            _totals[id] = amount;
+            SetRaw(id, amount);
             OnExperienceChanged?.Invoke(id, old, amount);
             if (curve != null)
             {
@@ -80,7 +133,7 @@ namespace CupkekGames.Resources.Experiences
             long next = old + amount;
             ExperienceCurveSO curve = ResolveCurve(id);
             int oldLevel = curve != null ? ExperienceHelper.GetLevel((int)old, curve.GetRequiredExperience) : 0;
-            _totals[id] = next;
+            SetRaw(id, next);
             OnExperienceChanged?.Invoke(id, old, next);
             if (curve != null)
             {
@@ -125,7 +178,10 @@ namespace CupkekGames.Resources.Experiences
 
         public bool Validate() => true;
 
-        public void OnAfterDeserialize() { }
+        public void OnAfterDeserialize()
+        {
+            _cache = null;
+        }
 
         /// <summary>Resolves the curve for a track id via the registered ExperienceCatalog + ExperienceCurveCatalog. Returns null if either catalog isn't registered.</summary>
         private static ExperienceCurveSO ResolveCurve(string trackId)

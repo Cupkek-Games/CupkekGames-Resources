@@ -1,7 +1,7 @@
 {
   "name": "com.cupkekgames.resources",
   "displayName": "CupkekGames Resources",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "CupkekGames",
     "url": "https://www.docs.cupkek.games"
@@ -19,6 +19,7 @@
   ],
   "dependencies": {
     "com.cupkekgames.data": "0.3.0",
-    "com.cupkekgames.services": "0.1.4"
+    "com.cupkekgames.keyvaluedatabases": "0.2.0",
+    "com.cupkekgames.services": "0.1.6"
   }
 }

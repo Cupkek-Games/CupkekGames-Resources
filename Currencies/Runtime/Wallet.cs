@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using CupkekGames.Data;
+using UnityEngine;
+using CurrencyPair = CupkekGames.KeyValueDatabases.KeyValuePair<string, long>;
 
 namespace CupkekGames.Resources.Currencies
 {
@@ -10,9 +12,16 @@ namespace CupkekGames.Resources.Currencies
     /// it slots cleanly into save-data structures.
     /// </summary>
     /// <remarks>
+    /// Storage is serializer-agnostic (see <see cref="CupkekGames.KeyValueDatabases.KeyValueDatabase{TKey,TValue}"/> for the
+    /// canonical pattern): the serialized source of truth is a Unity-serializable pair list —
+    /// Unity binds the <c>[SerializeField]</c> field, reflection serializers (Newtonsoft, …)
+    /// bind the public <see cref="Balances"/> property — and the runtime dictionary is a lazy,
+    /// never-serialized cache.
+    /// <para>
     /// <see cref="OnChanged"/> fires on <see cref="Set"/>, <see cref="Add"/>, and
     /// successful <see cref="Spend"/> with <c>(id, oldValue, newValue)</c>. Subscribe
     /// from UI binders that animate count-up tweens.
+    /// </para>
     /// </remarks>
     [Serializable]
     public class Wallet : IData
@@ -20,7 +29,9 @@ namespace CupkekGames.Resources.Currencies
         /// <summary>Fires with <c>(currencyId, oldValue, newValue)</c> on every successful mutation.</summary>
         public event Action<string, long, long> OnChanged;
 
-        private Dictionary<string, long> _balances = new();
+        [SerializeField] private List<CurrencyPair> _balances = new();
+
+        [NonSerialized] private Dictionary<string, long> _cache;
 
         public Wallet() { }
 
@@ -28,17 +39,59 @@ namespace CupkekGames.Resources.Currencies
         {
             if (other?._balances == null)
                 return;
-            foreach (KeyValuePair<string, long> pair in other._balances)
-                _balances[pair.Key] = pair.Value;
+            foreach (CurrencyPair pair in other._balances)
+                _balances.Add(new CurrencyPair { Key = pair.Key, Value = pair.Value });
         }
 
-        public IReadOnlyDictionary<string, long> Balances => _balances;
+        /// <summary>
+        /// Serialized pairs, exposed for reflection-based serializers. Unity ignores
+        /// properties and binds the backing field directly.
+        /// </summary>
+        public List<CurrencyPair> Balances
+        {
+            get => _balances;
+            set
+            {
+                _balances = value ?? new List<CurrencyPair>();
+                _cache = null;
+            }
+        }
+
+        private Dictionary<string, long> Cache
+        {
+            get
+            {
+                if (_cache == null)
+                {
+                    _cache = new Dictionary<string, long>(_balances.Count);
+                    foreach (CurrencyPair pair in _balances)
+                        _cache.TryAdd(pair.Key, pair.Value);
+                }
+                return _cache;
+            }
+        }
+
+        private void SetRaw(string id, long amount)
+        {
+            if (Cache.ContainsKey(id))
+            {
+                Cache[id] = amount;
+                int index = _balances.FindIndex(pair => pair.Key == id);
+                if (index >= 0)
+                    _balances[index] = new CurrencyPair { Key = id, Value = amount };
+            }
+            else
+            {
+                Cache.Add(id, amount);
+                _balances.Add(new CurrencyPair { Key = id, Value = amount });
+            }
+        }
 
         public long Get(string id) =>
-            !string.IsNullOrEmpty(id) && _balances.TryGetValue(id, out long v) ? v : 0L;
+            !string.IsNullOrEmpty(id) && Cache.TryGetValue(id, out long v) ? v : 0L;
 
         public bool Has(string id) =>
-            !string.IsNullOrEmpty(id) && _balances.ContainsKey(id);
+            !string.IsNullOrEmpty(id) && Cache.ContainsKey(id);
 
         public bool CanAfford(string id, long amount) => Get(id) >= amount;
 
@@ -50,7 +103,7 @@ namespace CupkekGames.Resources.Currencies
             long old = Get(id);
             if (old == amount)
                 return;
-            _balances[id] = amount;
+            SetRaw(id, amount);
             OnChanged?.Invoke(id, old, amount);
         }
 
@@ -61,7 +114,7 @@ namespace CupkekGames.Resources.Currencies
                 return;
             long old = Get(id);
             long next = old + amount;
-            _balances[id] = next;
+            SetRaw(id, next);
             OnChanged?.Invoke(id, old, next);
         }
 
@@ -77,7 +130,7 @@ namespace CupkekGames.Resources.Currencies
             if (old < amount)
                 return false;
             long next = old - amount;
-            _balances[id] = next;
+            SetRaw(id, next);
             OnChanged?.Invoke(id, old, next);
             return true;
         }
@@ -86,6 +139,9 @@ namespace CupkekGames.Resources.Currencies
 
         public bool Validate() => true;
 
-        public void OnAfterDeserialize() { }
+        public void OnAfterDeserialize()
+        {
+            _cache = null;
+        }
     }
 }
